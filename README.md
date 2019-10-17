@@ -25,8 +25,8 @@ pn532.SAM_configuration()
 
 # FUNCTION TO READ 
 def read_nfc(dev, tmot):
-		"""Accepts a device and a timeout in millisecs """
-		print('Reading...')
+    """Accepts a device and a timeout in millisecs """
+    print('Reading...')
     uid = dev.read_passive_target(timeout=tmot)
     if uid is None:
         print('CARD NOT FOUND')
