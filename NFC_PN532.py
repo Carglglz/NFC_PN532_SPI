@@ -134,13 +134,14 @@ class PN532:
 
     def _wait_ready(self, timeout=1000):
         """Poll PN532 if status byte is ready, up to `timeout` milliseconds"""
-        status = bytearray([reverse_bit(_SPI_STATREAD), 0])
+        status_query = bytearray([reverse_bit(_SPI_STATREAD), 0])
+        status = bytearray([0, 0])
         timestamp = time.ticks_ms()
         while time.ticks_diff(time.ticks_ms(), timestamp) < timeout:
             time.sleep(0.02)   # required
             self.CSB.off()
             time.sleep_ms(2)
-            self._spi.write_readinto(status, status)
+            self._spi.write_readinto(status_query, status)
             time.sleep_ms(2)
             self.CSB.on()
             if reverse_bit(status[1]) == 0x01:  # LSB data is read in MSB
@@ -270,11 +271,15 @@ class PN532:
             self._wakeup()
             return None
         if not self._wait_ready(timeout):
+            if(self.debug):
+                print('DEBUG: _wait_ready timed out waiting for ACK')
             return None
         # Verify ACK response and wait to be ready for function response.
         if not _ACK == self._read_data(len(_ACK)):
             raise RuntimeError('Did not receive expected ACK from PN532!')
         if not self._wait_ready(timeout):
+            if(self.debug):
+                print('DEBUG: _wait_ready timed out waiting for response')
             return None
         # Read response bytes.
         response = self._read_frame(response_length+2)
