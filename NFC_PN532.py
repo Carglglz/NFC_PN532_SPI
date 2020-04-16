@@ -60,6 +60,9 @@ MIFARE_CMD_READ = const(0x30)
 MIFARE_CMD_WRITE = const(0xA0)
 MIFARE_ULTRALIGHT_CMD_WRITE = const(0xA2)
 
+# Known keys
+KEY_DEFAULT_B = bytes([0xFF]*6)
+
 
 _ACK = b'\x00\x00\xFF\x00\xFF\x00'
 _FRAME_START = b'\x00\x00\xFF'
@@ -380,3 +383,27 @@ class PN532:
             return None
         # Return first 4 bytes since 16 bytes are always returned.
         return response[1:]
+
+    def mifare_classic_authenticate_block(self, uid, block_number, key_number=MIFARE_CMD_AUTH_B, key=KEY_DEFAULT_B):  # pylint: disable=invalid-name
+        """Authenticate specified block number for a MiFare classic card.  Uid
+        should be a byte array with the UID of the card, block number should be
+        the block to authenticate, key number should be the key type (like
+        MIFARE_CMD_AUTH_A or MIFARE_CMD_AUTH_B), and key should be a byte array
+        with the key data.  Returns True if the block was authenticated, or False
+        if not authenticated.
+        """
+        # Build parameters for InDataExchange command to authenticate MiFare card.
+        uidlen = len(uid)
+        keylen = len(key)
+        params = bytearray(3 + uidlen + keylen)
+        params[0] = 0x01  # Max card numbers
+        params[1] = key_number & 0xFF
+        params[2] = block_number & 0xFF
+        params[3 : 3 + keylen] = key
+        params[3 + keylen :] = uid
+        # Send InDataExchange request and verify response is 0x00.
+        response = self.call_function(
+            _COMMAND_INDATAEXCHANGE, params=params, response_length=1
+        )
+        return response[0] == 0x00
+
