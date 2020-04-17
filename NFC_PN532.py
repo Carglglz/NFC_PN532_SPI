@@ -60,6 +60,9 @@ MIFARE_CMD_READ = const(0x30)
 MIFARE_CMD_WRITE = const(0xA0)
 MIFARE_ULTRALIGHT_CMD_WRITE = const(0xA2)
 
+# Known keys
+KEY_DEFAULT_B = bytes([0xFF]*6)
+
 
 _ACK = b'\x00\x00\xFF\x00\xFF\x00'
 _FRAME_START = b'\x00\x00\xFF'
@@ -166,7 +169,7 @@ class PN532:
         for i, val in enumerate(frame):
             frame[i] = reverse_bit(val)  # turn LSB data to MSB
         if self.debug:
-            print("Reading: ", [hex(i) for i in frame[1:]])
+            print("DEBUG: _read_data: ", [hex(i) for i in frame[1:]])
         return frame[1:]   # don't return the status byte
 
     def _write_data(self, framebytes):
@@ -176,7 +179,7 @@ class PN532:
         rev_frame = [reverse_bit(x)
                      for x in bytes([_SPI_DATAWRITE]) + framebytes]
         if self.debug:
-            print("Writing: ", [hex(i) for i in rev_frame])
+            print("DEBUG: _write_data: ", [hex(i) for i in rev_frame])
         time.sleep(0.02)   # required
         self.CSB.off()
         time.sleep_ms(2)
@@ -210,7 +213,7 @@ class PN532:
         frame[-1] = _POSTAMBLE
         # Send frame.
         if self.debug:
-            print('Write frame: ', [hex(i) for i in frame])
+            print('DEBUG: _write_frame: ', [hex(i) for i in frame])
         self._write_data(bytes(frame))
 
     def _read_frame(self, length):
@@ -222,7 +225,7 @@ class PN532:
         # Read frame with expected length of data.
         response = self._read_data(length+8)
         if self.debug:
-            print('Read frame:', [hex(i) for i in response])
+            print('DEBUG: _read_frame:', [hex(i) for i in response])
 
         # Swallow all the 0x00 values that preceed 0xFF.
         offset = 0
@@ -283,6 +286,8 @@ class PN532:
             return None
         # Read response bytes.
         response = self._read_frame(response_length+2)
+        if(self.debug):
+            print('DEBUG: call_function response:', [hex(i) for i in response])
         # Check that response is for the called function.
         if not (response[0] == _PN532TOHOST and response[1] == (command+1)):
             raise RuntimeError('Received unexpected command response!')
@@ -378,3 +383,27 @@ class PN532:
             return None
         # Return first 4 bytes since 16 bytes are always returned.
         return response[1:]
+
+    def mifare_classic_authenticate_block(self, uid, block_number, key_number=MIFARE_CMD_AUTH_B, key=KEY_DEFAULT_B):  # pylint: disable=invalid-name
+        """Authenticate specified block number for a MiFare classic card.  Uid
+        should be a byte array with the UID of the card, block number should be
+        the block to authenticate, key number should be the key type (like
+        MIFARE_CMD_AUTH_A or MIFARE_CMD_AUTH_B), and key should be a byte array
+        with the key data.  Returns True if the block was authenticated, or False
+        if not authenticated.
+        """
+        # Build parameters for InDataExchange command to authenticate MiFare card.
+        uidlen = len(uid)
+        keylen = len(key)
+        params = bytearray(3 + uidlen + keylen)
+        params[0] = 0x01  # Max card numbers
+        params[1] = key_number & 0xFF
+        params[2] = block_number & 0xFF
+        params[3 : 3 + keylen] = key
+        params[3 + keylen :] = uid
+        # Send InDataExchange request and verify response is 0x00.
+        response = self.call_function(
+            _COMMAND_INDATAEXCHANGE, params=params, response_length=1
+        )
+        return response[0] == 0x00
+
