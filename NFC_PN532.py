@@ -20,10 +20,7 @@ import time
 from machine import Pin
 from micropython import const
 
-# __version__ = "0.0.0-auto.0"
-# __repo__ = "https://github.com/adafruit/Adafruit_CircuitPython_PN532.git"
 
-# pylint: disable=bad-whitespace
 _PREAMBLE = const(0x00)
 _STARTCODE1 = const(0x00)
 _STARTCODE2 = const(0xFF)
@@ -39,6 +36,7 @@ _COMMAND_GETGENERALSTATUS = const(0x04)
 _COMMAND_SETSERIALBAUDRATE = const(0x10)
 _COMMAND_SETPARAMETERS = const(0x12)
 _COMMAND_SAMCONFIGURATION = const(0x14)
+_COMMAND_POWERDOWN = const(0x16)
 
 _COMMAND_INLISTPASSIVETARGET = const(0x4A)
 
@@ -61,8 +59,11 @@ MIFARE_CMD_WRITE = const(0xA0)
 MIFARE_ULTRALIGHT_CMD_WRITE = const(0xA2)
 
 # Known keys
-KEY_DEFAULT_B = bytes([0xFF]*6)
+_KEY_DEFAULT = bytes([0xFF]*6)
+_NFC_SECTOR_KEY = b"\xD3\xF7\xD3\xF7\xD3\xF7"
+_MAD_KEY = b"\xA0\xA1\xA2\xA3\xA4\xA5"
 
+# A KEY ALLOWS READING, B KEY ALLOWS WRITING
 
 _ACK = b'\x00\x00\xFF\x00\xFF\x00'
 _FRAME_START = b'\x00\x00\xFF'
@@ -71,17 +72,6 @@ _SPI_STATREAD = const(0x02)
 _SPI_DATAWRITE = const(0x01)
 _SPI_DATAREAD = const(0x03)
 _SPI_READY = const(0x01)
-
-
-def _reset(pin):
-    """Perform a hardware reset toggle"""
-    pin.init(Pin.OUT)
-    pin.value(True)
-    time.sleep(0.1)
-    pin.value(False)
-    time.sleep(0.5)
-    pin.value(True)
-    time.sleep(0.1)
 
 
 class BusyError(Exception):
@@ -112,10 +102,16 @@ class PN532:
         self.CSB = cs_pin
         self._spi = spi
         self.CSB.on()
+        self.rst = reset
+        self.low_power = True
+        self.mifare_keys = {'DEF': _KEY_DEFAULT, 'MAD': _MAD_KEY,
+                            'NFCS': _NFC_SECTOR_KEY}
+
+        self._auth_key = self.mifare_keys['DEF']
         if reset:
             if debug:
                 print("Resetting")
-            _reset(reset)
+            self.reset()
 
         try:
             self._wakeup()
@@ -123,7 +119,58 @@ class PN532:
             return
         except (BusyError, RuntimeError):
             pass
+        self._fwv = self.firmware_version
         # self.get_firmware_version()
+
+    def set_auth_key(self, keystr):
+        """ 'DEF': DEFAULT MIFARE KEY
+            'MAD': Mifare Application Directory KEY (A)
+            'NFCS': NFC Sectors KEY (A)
+            """
+        if keystr not in self.mifare_keys.keys():
+            print('Not a valid key')
+        else:
+            self._auth_key = self.mifare_keys[keystr]
+
+    @property
+    def auth_key(self):
+        for key, val in self.mifare_keys.items():
+            if val == self._auth_key:
+                return key
+
+    @auth_key.setter
+    def auth_key(self, key):
+        if isinstance(key, str):
+            self.set_auth_key(key)
+        elif isinstance(key, bytes):
+            self._auth_key = key
+        else:
+            print('Not a valid key')
+
+    def reset(self):
+        """Perform a hardware reset toggle and then wake up the PN532"""
+        self.rst.init(Pin.OUT)
+        self.rst.value(True)
+        # time.sleep(0.1)
+        self.rst.value(False)
+        time.sleep(0.4)
+        self.rst.value(True)
+        time.sleep(0.1)
+
+    def power_down(self):
+        """Put the PN532 into a low power state. If the reset pin is connected a
+        hard power down is performed, if not, a soft power down is performed
+        instead. Returns True if the PN532 was powered down successfully or
+        False if not."""
+        if self.rst:  # Hard Power Down if the reset pin is connected
+            self.rst.value(False)
+            self.low_power = True
+        else:
+            # Soft Power Down otherwise. Enable wakeup on I2C, SPI, UART
+            response = self.call_function(_COMMAND_POWERDOWN, params=[0xB0, 0x00])
+            self.low_power = response[0] == 0x00
+        time.sleep(0.005)
+        return self.low_power
 
     def _wakeup(self):
         """Send any special commands/data to wake up PN532"""
@@ -294,6 +341,17 @@ class PN532:
         # Return response data.
         return response[2:]
 
+    @property
+    def firmware_version(self):
+        """Call PN532 GetFirmwareVersion function and return a tuple with the IC,
+        Ver, Rev, and Support values.
+        """
+        response = self.call_function(
+            _COMMAND_GETFIRMWAREVERSION, 4, timeout=500)
+        if response is None:
+            raise RuntimeError('Failed to detect the PN532')
+        return tuple(response)
+
     def get_firmware_version(self):
         """Call PN532 GetFirmwareVersion function and return a tuple with the IC,
         Ver, Rev, and Support values.
@@ -365,7 +423,9 @@ class PN532:
         data starting at the specified block will be returned.  If the block is
         not read then None will be returned.
         """
-        return self.mifare_classic_read_block(block_number)[0:4]  # only 4 bytes per page
+        data = self.mifare_classic_read_block(block_number)
+        if data:
+            return data[0:4]  # only 4 bytes per page
 
     def mifare_classic_read_block(self, block_number):
         """Read a block of data from the card.  Block number should be the block
@@ -384,7 +444,30 @@ class PN532:
         # Return first 4 bytes since 16 bytes are always returned.
         return response[1:]
 
-    def mifare_classic_authenticate_block(self, uid, block_number, key_number=MIFARE_CMD_AUTH_B, key=KEY_DEFAULT_B):  # pylint: disable=invalid-name
+    def mifare_classic_write_block(self, block_number, data):
+        """Write a block of data to the card.  Block number should be the block
+        to write and data should be a byte array of length 16 with the data to
+        write.  If the data is successfully written then True is returned,
+        otherwise False is returned.
+        """
+        assert (
+            data is not None and len(data) == 16
+        ), "Data must be an array of 16 bytes!"
+        # Build parameters for InDataExchange command to do MiFare classic write.
+        params = bytearray(19)
+        params[0] = 0x01  # Max card numbers
+        params[1] = MIFARE_CMD_WRITE
+        params[2] = block_number & 0xFF
+        params[3:] = data
+        # Send InDataExchange request.
+        response = self.call_function(
+            _COMMAND_INDATAEXCHANGE, params=params, response_length=1
+        )
+        return response[0] == 0x0
+
+    def mifare_classic_authenticate_block(self, uid, block_number,
+                                          key_number=MIFARE_CMD_AUTH_B,
+                                          key=None):
         """Authenticate specified block number for a MiFare classic card.  Uid
         should be a byte array with the UID of the card, block number should be
         the block to authenticate, key number should be the key type (like
@@ -393,17 +476,71 @@ class PN532:
         if not authenticated.
         """
         # Build parameters for InDataExchange command to authenticate MiFare card.
+        if key:
+            pass
+        else:
+            key = self._auth_key
         uidlen = len(uid)
         keylen = len(key)
         params = bytearray(3 + uidlen + keylen)
         params[0] = 0x01  # Max card numbers
         params[1] = key_number & 0xFF
         params[2] = block_number & 0xFF
-        params[3 : 3 + keylen] = key
-        params[3 + keylen :] = uid
+        params[3:3 + keylen] = key
+        params[3 + keylen:] = uid
         # Send InDataExchange request and verify response is 0x00.
         response = self.call_function(
             _COMMAND_INDATAEXCHANGE, params=params, response_length=1
         )
         return response[0] == 0x00
 
+    def read_mifare_classic(self, block_number, timeout=1000, key=None, debug=False,
+                            uid=None):
+        """Read a block of data from the card.  Block number should be the block
+        to read.  If the block is successfully read a bytearray of length 16 with
+        data starting at the specified block will be returned.  If the block is
+        not read then None will be returned.
+        """
+        if not uid:
+            uid = self.read_passive_target(timeout=timeout)
+        if uid:
+
+                if self.mifare_classic_authenticate_block(uid, block_number, key=key):
+                    response = self.mifare_classic_read_block(block_number)
+                    return response
+                else:
+                    if debug:
+                        print('Authentication failed, KEY INVALID')
+
+    def read_ntag2xx(self, block_number, timeout=1000, key=None, debug=False):
+        uid = self.read_passive_target(timeout=timeout)
+        if uid:
+            if self.mifare_classic_authenticate_block(uid, block_number, key=key):
+                response = self.ntag2xx_read_block(block_number)
+                return response
+            else:
+                if debug:
+                    print('Authentication failed, KEY INVALID')
+
+    def write_mifare_classic(self, block_number, data, timeout=1000, key=None,
+                             debug=False):
+        uid = self.read_passive_target(timeout=timeout)
+        if uid:
+            authenticated = self.mifare_classic_authenticate_block(uid, block_number,
+                                                                   key=key)
+            if not authenticated:
+                if debug:
+                    print('Authentication failed, KEY INVALID')
+            response = self.mifare_classic_write_block(block_number, data)
+            return response
+
+    def write_ntag2xx(self, block_number, data, timeout=1000, key=None, debug=False):
+        uid = self.read_passive_target(timeout=timeout)
+        if uid:
+
+            if self.mifare_classic_authenticate_block(uid, block_number, key=key):
+                response = self.ntag2xx_write_block(block_number)
+                return response
+            else:
+                if debug:
+                    print('Authentication failed, KEY INVALID')
