@@ -132,6 +132,7 @@
 import struct
 import io
 from ndeftext import NDEFTextRecord
+from ndefuri import MicroUri
 
 
 class NDEFdecodeError(Exception):
@@ -143,9 +144,9 @@ class NDEFdecodeError(Exception):
 
     def __str__(self):
         if self.message:
-            return 'NDEFdecodeError: {0} '.format(self.message)
+            return "NDEFdecodeError: {0} ".format(self.message)
         else:
-            return 'NDEFdecodeError'
+            return "NDEFdecodeError"
 
 
 class NDEFRecordHeader:
@@ -160,7 +161,7 @@ class NDEFRecordHeader:
 
 class NDEFRecord:
     def __init__(self, stream_or_bytes):
-        """"
+        """ "
         NDEF Records contain a specific payload
         """
         if isinstance(stream_or_bytes, (io.IOBase)):
@@ -181,7 +182,10 @@ class NDEFRecord:
         self._record_id = 0
         self._payload = bytes()
         self.MAX_PAYLOAD_SIZE = 512
-        self.known_types = {'urn:nfc:wkt:T': NDEFTextRecord}
+        self.known_types = {
+            NDEFTextRecord._type: NDEFTextRecord,
+            MicroUri._type: MicroUri,
+        }
         self._decode_min_payload_length = 1
         self._decode_max_payload_length = 512
 
@@ -203,7 +207,7 @@ class NDEFRecord:
             raise self._decode_error("TNF field value must be between 0 and 6")
 
         try:
-            structfmt = ('>B' + ('B' if SR else 'L') + ('B' if IL else ''))
+            structfmt = ">B" + ("B" if SR else "L") + ("B" if IL else "")
             data = self._data.read(struct.calcsize(structfmt))
             fields = struct.unpack(structfmt, data) + (0,)
         except Exception as e:
@@ -252,7 +256,7 @@ class NDEFRecord:
             # assert isinstance(record, NDEFRecord)
             # record.name = ID
         else:
-            record = '?'
+            record = "?"
 
         return (record, MB, ME, CF)
 
@@ -262,48 +266,47 @@ class NDEFRecord:
         # plus TYPE, for TNF 0, 5, and 6 it is a fixed string, for TNF
         # 2 and 3 it is directly the TYPE string. Other TNF values are
         # not allowed.
-        prefix = ('', 'urn:nfc:wkt:', '', '', 'urn:nfc:ext:',
-                  'unknown', 'unchanged')
+        prefix = ("", "urn:nfc:wkt:", "", "", "urn:nfc:ext:", "unknown", "unchanged")
         if not 0 <= TNF <= 6:
-            raise self._value_error('NDEF Record TNF values must be 0 to 6')
+            raise self._value_error("NDEF Record TNF values must be 0 to 6")
         if TNF in (0, 5, 6):
-            TYPE = b''
+            TYPE = b""
         return prefix[TNF] + (TYPE.decode())
 
     def _decode_struct(self, fmt, octets, offset=0, always_tuple=False):
         #
-        assert fmt[0] not in ('@', '=', '!'), "only '>' and '<' are allowed"
-        assert fmt.count('*') < 2, "only one '*' expression is allowed"
-        assert '*' not in fmt or fmt.find('*') > fmt.rfind('+')
-        order, fmt = (fmt[0], fmt[1:]) if fmt[0] in ('>', '<') else ('>', fmt)
+        assert fmt[0] not in ("@", "=", "!"), "only '>' and '<' are allowed"
+        assert fmt.count("*") < 2, "only one '*' expression is allowed"
+        assert "*" not in fmt or fmt.find("*") > fmt.rfind("+")
+        order, fmt = (fmt[0], fmt[1:]) if fmt[0] in (">", "<") else (">", fmt)
         try:
             values = list()
             this_fmt = fmt
             while this_fmt:
-                this_fmt, plus_fmt, next_fmt = this_fmt.partition('+')
-                if '*' in this_fmt:
-                    this_fmt, next_fmt = this_fmt.split('*', 1)
+                this_fmt, plus_fmt, next_fmt = this_fmt.partition("+")
+                if "*" in this_fmt:
+                    this_fmt, next_fmt = this_fmt.split("*", 1)
                     if this_fmt:
-                        next_fmt = '*' + next_fmt
+                        next_fmt = "*" + next_fmt
                     elif next_fmt:
                         trailing = len(octets) - offset
                         size_fmt = struct.calcsize(next_fmt)
                         this_fmt = int(trailing / size_fmt) * next_fmt
-                        next_fmt = '*' if trailing % size_fmt else ''
+                        next_fmt = "*" if trailing % size_fmt else ""
                     else:
-                        this_fmt = str(len(octets) - offset) + 's'
-                        next_fmt = ''
+                        this_fmt = str(len(octets) - offset) + "s"
+                        next_fmt = ""
                 structfmt = order + this_fmt
                 values = values + list(struct.unpack_from(structfmt, octets, offset))
                 offset = offset + struct.calcsize(structfmt)
                 if plus_fmt:
-                    if next_fmt.startswith('('):
-                        this_fmt, next_fmt = next_fmt[1:].split(')', 1)
+                    if next_fmt.startswith("("):
+                        this_fmt, next_fmt = next_fmt[1:].split(")", 1)
                         structfmt = order + values.pop() * this_fmt
                         values.append(struct.unpack_from(structfmt, octets, offset))
                         offset = offset + struct.calcsize(structfmt)
                     else:
-                        structfmt = '{:d}s'.format(values.pop())
+                        structfmt = "{:d}s".format(values.pop())
                         values.extend(struct.unpack_from(structfmt, octets, offset))
                         offset = offset + struct.calcsize(structfmt)
                 this_fmt = next_fmt
@@ -329,6 +332,16 @@ class NDEFRecord:
         # formatted string fmt is joined with a '.' if the first word
         # of fmt is the name of a non-function class attribute,
         # otherwise it is joined with ' '.
-        record = 'NDEFRecord'
-        joinby = ': '
+        record = "NDEFRecord"
+        joinby = ": "
         return ValueError(record + joinby + fmt.format(*args, **kwargs))
+
+    def _value_to_unicode(self, value, name):
+        try:
+            if isinstance(value, (str, bytes)):
+                return value if isinstance(value, str) else value.decode("ascii")
+            if isinstance(value, bytearray):
+                return value.decode("ascii")
+        except UnicodeError:
+            errstr = name + " conversion requires ascii text, but got {!r}"
+            raise self._value_error(errstr, value)

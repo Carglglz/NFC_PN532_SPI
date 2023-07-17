@@ -19,6 +19,7 @@ https://github.com/Carglglz/NFC_PN532_SPI
 import time
 from machine import Pin
 from micropython import const
+import uasyncio as asyncio
 
 
 _PREAMBLE = const(0x00)
@@ -123,7 +124,7 @@ class PN532:
             return
         except (BusyError, RuntimeError):
             pass
-        self._fwv = self.firmware_version
+        # self._fwv = self.firmware_version
         # self.get_firmware_version()
 
     def set_auth_key(self, keystr):
@@ -161,7 +162,7 @@ class PN532:
         self.rst.value(True)
         time.sleep(0.1)
 
-    def power_down(self):
+    async def power_down(self):
         """Put the PN532 into a low power state. If the reset pin is connected a
         hard power down is performed, if not, a soft power down is performed
         instead. Returns True if the PN532 was powered down successfully or
@@ -171,7 +172,7 @@ class PN532:
             self.low_power = True
         else:
             # Soft Power Down otherwise. Enable wakeup on I2C, SPI, UART
-            response = self.call_function(_COMMAND_POWERDOWN, params=[0xB0, 0x00])
+            response = await self.call_function(_COMMAND_POWERDOWN, params=[0xB0, 0x00])
             self.low_power = response[0] == 0x00
         time.sleep(0.005)
         return self.low_power
@@ -186,36 +187,36 @@ class PN532:
         self.CSB.on()  # pylint: disable=no-member
         time.sleep(1)
 
-    def _wait_ready(self, timeout=1000):
+    async def _wait_ready(self, timeout=1000):
         """Poll PN532 if status byte is ready, up to `timeout` milliseconds"""
         status_query = bytearray([reverse_bit(_SPI_STATREAD), 0])
         status = bytearray([0, 0])
         timestamp = time.ticks_ms()
         while time.ticks_diff(time.ticks_ms(), timestamp) < timeout:
-            time.sleep(0.02)  # required
+            await asyncio.sleep_ms(2)  # required
             self.CSB.off()
-            time.sleep_ms(2)
+            await asyncio.sleep_ms(2)
             self._spi.write_readinto(status_query, status)
-            time.sleep_ms(2)
+            await asyncio.sleep_ms(2)
             self.CSB.on()
             if reverse_bit(status[1]) == 0x01:  # LSB data is read in MSB
                 return True  # Not busy anymore!
             else:
-                time.sleep(0.01)  # pause a bit till we ask again
+                await asyncio.sleep_ms(50)  # pause a bit till we ask again
         # Timed out!
         return False
 
-    def _read_data(self, count):
+    async def _read_data(self, count):
         """Read a specified count of bytes from the PN532."""
         # Build a read request frame.
         frame = bytearray(count + 1)
         # Add the SPI data read signal byte, but LSB'ify it
         frame[0] = reverse_bit(_SPI_DATAREAD)
-        time.sleep(0.02)  # required
+        await asyncio.sleep(0.02)  # required
         self.CSB.off()
-        time.sleep_ms(2)
+        await asyncio.sleep_ms(2)
         self._spi.write_readinto(frame, frame)
-        time.sleep_ms(2)
+        await asyncio.sleep_ms(2)
         self.CSB.on()
         for i, val in enumerate(frame):
             frame[i] = reverse_bit(val)  # turn LSB data to MSB
@@ -223,21 +224,21 @@ class PN532:
             print("DEBUG: _read_data: ", [hex(i) for i in frame[1:]])
         return frame[1:]  # don't return the status byte
 
-    def _write_data(self, framebytes):
+    async def _write_data(self, framebytes):
         """Write a specified count of bytes to the PN532"""
         # start by making a frame with data write in front,
         # then rest of bytes, and LSBify it
         rev_frame = [reverse_bit(x) for x in bytes([_SPI_DATAWRITE]) + framebytes]
         if self.debug:
             print("DEBUG: _write_data: ", [hex(i) for i in rev_frame])
-        time.sleep(0.02)  # required
+        await asyncio.sleep(0.02)  # required
         self.CSB.off()
-        time.sleep_ms(2)
+        await asyncio.sleep_ms(2)
         self._spi.write(bytes(rev_frame))  # pylint: disable=no-member
-        time.sleep_ms(2)
+        await asyncio.sleep_ms(2)
         self.CSB.on()
 
-    def _write_frame(self, data):
+    async def _write_frame(self, data):
         """Write a frame to the PN532 with the specified data bytearray."""
         assert (
             data is not None and 1 < len(data) < 255
@@ -265,16 +266,16 @@ class PN532:
         # Send frame.
         if self.debug:
             print("DEBUG: _write_frame: ", [hex(i) for i in frame])
-        self._write_data(bytes(frame))
+        await self._write_data(bytes(frame))
 
-    def _read_frame(self, length):
+    async def _read_frame(self, length):
         """Read a response frame from the PN532 of at most length bytes in size.
         Returns the data inside the frame if found, otherwise raises an exception
         if there is an error parsing the frame.  Note that less than length bytes
         might be returned!
         """
         # Read frame with expected length of data.
-        response = self._read_data(length + 8)
+        response = await self._read_data(length + 8)
         if self.debug:
             print("DEBUG: _read_frame:", [hex(i) for i in response])
 
@@ -302,7 +303,7 @@ class PN532:
         # Return frame data.
         return response[offset + 2 : offset + 2 + frame_len]
 
-    def call_function(
+    async def call_function(
         self, command, response_length=0, params=[], timeout=1000
     ):  # pylint: disable=dangerous-default-value
         """Send specified command to the PN532 and expect up to response_length
@@ -320,23 +321,23 @@ class PN532:
             data[2 + i] = val
         # Send frame and wait for response.
         try:
-            self._write_frame(data)
+            await self._write_frame(data)
         except OSError:
             self._wakeup()
             return None
-        if not self._wait_ready(timeout):
+        if not await self._wait_ready(timeout):
             if self.debug:
                 print("DEBUG: _wait_ready timed out waiting for ACK")
             return None
         # Verify ACK response and wait to be ready for function response.
-        if not _ACK == self._read_data(len(_ACK)):
+        if not _ACK == await self._read_data(len(_ACK)):
             raise RuntimeError("Did not receive expected ACK from PN532!")
-        if not self._wait_ready(timeout):
+        if not await self._wait_ready(timeout):
             if self.debug:
                 print("DEBUG: _wait_ready timed out waiting for response")
             return None
         # Read response bytes.
-        response = self._read_frame(response_length + 2)
+        response = await self._read_frame(response_length + 2)
         if self.debug:
             print("DEBUG: call_function response:", [hex(i) for i in response])
         # Check that response is for the called function.
@@ -346,25 +347,25 @@ class PN532:
         return response[2:]
 
     @property
-    def firmware_version(self):
+    async def firmware_version(self):
         """Call PN532 GetFirmwareVersion function and return a tuple with the IC,
         Ver, Rev, and Support values.
         """
-        response = self.call_function(_COMMAND_GETFIRMWAREVERSION, 4, timeout=500)
+        response = await self.call_function(_COMMAND_GETFIRMWAREVERSION, 4, timeout=500)
         if response is None:
             raise RuntimeError("Failed to detect the PN532")
         return tuple(response)
 
-    def get_firmware_version(self):
+    async def get_firmware_version(self):
         """Call PN532 GetFirmwareVersion function and return a tuple with the IC,
         Ver, Rev, and Support values.
         """
-        response = self.call_function(_COMMAND_GETFIRMWAREVERSION, 4, timeout=500)
+        response = await self.call_function(_COMMAND_GETFIRMWAREVERSION, 4, timeout=500)
         if response is None:
             raise RuntimeError("Failed to detect the PN532")
         return tuple(response)
 
-    def SAM_configuration(self):  # pylint: disable=invalid-name
+    async def SAM_configuration(self):  # pylint: disable=invalid-name
         """Configure the PN532 to read MiFare cards."""
         # Send SAM configuration command with configuration for:
         # - 0x01, normal mode
@@ -372,16 +373,16 @@ class PN532:
         # - 0x01, use IRQ pin
         # Note that no other verification is necessary as call_function will
         # check the command was executed as expected.
-        self.call_function(_COMMAND_SAMCONFIGURATION, params=[0x01, 0x14, 0x01])
+        await self.call_function(_COMMAND_SAMCONFIGURATION, params=[0x01, 0x14, 0x01])
 
-    def read_passive_target(self, card_baud=_MIFARE_ISO14443A, timeout=1000):
+    async def read_passive_target(self, card_baud=_MIFARE_ISO14443A, timeout=1000):
         """Wait for a MiFare card to be available and return its UID when found.
         Will wait up to timeout seconds and return None if no card is found,
         otherwise a bytearray with the UID of the found card is returned.
         """
         # Send passive read command for 1 card.  Expect at most a 7 byte UUID.
         try:
-            response = self.call_function(
+            response = await self.call_function(
                 _COMMAND_INLISTPASSIVETARGET,
                 params=[0x01, card_baud],
                 response_length=19,
@@ -400,7 +401,7 @@ class PN532:
         # Return UID of card.
         return response[6 : 6 + response[5]]
 
-    def ntag2xx_write_block(self, block_number, data):
+    async def ntag2xx_write_block(self, block_number, data):
         """Write a block of data to the card.  Block number should be the block
         to write and data should be a byte array of length 4 with the data to
         write.  If the data is successfully written then True is returned,
@@ -414,29 +415,29 @@ class PN532:
         params[2] = block_number & 0xFF
         params[3:] = data
         # Send InDataExchange request.
-        response = self.call_function(
+        response = await self.call_function(
             _COMMAND_INDATAEXCHANGE, params=params, response_length=1
         )
         return response[0] == 0x00
 
-    def ntag2xx_read_block(self, block_number):
+    async def ntag2xx_read_block(self, block_number):
         """Read a block of data from the card.  Block number should be the block
         to read.  If the block is successfully read a bytearray of length 16 with
         data starting at the specified block will be returned.  If the block is
         not read then None will be returned.
         """
-        data = self.mifare_classic_read_block(block_number)
+        data = await self.mifare_classic_read_block(block_number)
         if data:
             return data[0:4]  # only 4 bytes per page
 
-    def mifare_classic_read_block(self, block_number):
+    async def mifare_classic_read_block(self, block_number):
         """Read a block of data from the card.  Block number should be the block
         to read.  If the block is successfully read a bytearray of length 16 with
         data starting at the specified block will be returned.  If the block is
         not read then None will be returned.
         """
         # Send InDataExchange request to read block of MiFare data.
-        response = self.call_function(
+        response = await self.call_function(
             _COMMAND_INDATAEXCHANGE,
             params=[0x01, MIFARE_CMD_READ, block_number & 0xFF],
             response_length=17,
@@ -447,7 +448,7 @@ class PN532:
         # Return first 4 bytes since 16 bytes are always returned.
         return response[1:]
 
-    def mifare_classic_write_block(self, block_number, data):
+    async def mifare_classic_write_block(self, block_number, data):
         """Write a block of data to the card.  Block number should be the block
         to write and data should be a byte array of length 16 with the data to
         write.  If the data is successfully written then True is returned,
@@ -463,12 +464,12 @@ class PN532:
         params[2] = block_number & 0xFF
         params[3:] = data
         # Send InDataExchange request.
-        response = self.call_function(
+        response = await self.call_function(
             _COMMAND_INDATAEXCHANGE, params=params, response_length=1
         )
         return response[0] == 0x0
 
-    def mifare_classic_authenticate_block(
+    async def mifare_classic_authenticate_block(
         self, uid, block_number, key_number=MIFARE_CMD_AUTH_B, key=None
     ):
         """Authenticate specified block number for a MiFare classic card.  Uid
@@ -492,12 +493,12 @@ class PN532:
         params[3 : 3 + keylen] = key
         params[3 + keylen :] = uid
         # Send InDataExchange request and verify response is 0x00.
-        response = self.call_function(
+        response = await self.call_function(
             _COMMAND_INDATAEXCHANGE, params=params, response_length=1
         )
         return response[0] == 0x00
 
-    def read_mifare_classic(
+    async def read_mifare_classic(
         self, block_number, timeout=1000, key=None, debug=False, uid=None
     ):
         """Read a block of data from the card.  Block number should be the block
@@ -506,44 +507,46 @@ class PN532:
         not read then None will be returned.
         """
         if not uid:
-            uid = self.read_passive_target(timeout=timeout)
+            uid = await self.read_passive_target(timeout=timeout)
         if uid:
-            if self.mifare_classic_authenticate_block(uid, block_number, key=key):
-                response = self.mifare_classic_read_block(block_number)
+            if await self.mifare_classic_authenticate_block(uid, block_number, key=key):
+                response = await self.mifare_classic_read_block(block_number)
                 return response
             else:
                 if debug:
                     print("Authentication failed, KEY INVALID")
 
-    def read_ntag2xx(self, block_number, timeout=1000, key=None, debug=False):
-        uid = self.read_passive_target(timeout=timeout)
+    async def read_ntag2xx(self, block_number, timeout=1000, key=None, debug=False):
+        uid = await self.read_passive_target(timeout=timeout)
         if uid:
-            if self.mifare_classic_authenticate_block(uid, block_number, key=key):
-                response = self.ntag2xx_read_block(block_number)
+            if await self.mifare_classic_authenticate_block(uid, block_number, key=key):
+                response = await self.ntag2xx_read_block(block_number)
                 return response
             else:
                 if debug:
                     print("Authentication failed, KEY INVALID")
 
-    def write_mifare_classic(
+    async def write_mifare_classic(
         self, block_number, data, timeout=1000, key=None, debug=False
     ):
-        uid = self.read_passive_target(timeout=timeout)
+        uid = await self.read_passive_target(timeout=timeout)
         if uid:
-            authenticated = self.mifare_classic_authenticate_block(
+            authenticated = await self.mifare_classic_authenticate_block(
                 uid, block_number, key=key
             )
             if not authenticated:
                 if debug:
                     print("Authentication failed, KEY INVALID")
-            response = self.mifare_classic_write_block(block_number, data)
+            response = await self.mifare_classic_write_block(block_number, data)
             return response
 
-    def write_ntag2xx(self, block_number, data, timeout=1000, key=None, debug=False):
-        uid = self.read_passive_target(timeout=timeout)
+    async def write_ntag2xx(
+        self, block_number, data, timeout=1000, key=None, debug=False
+    ):
+        uid = await self.read_passive_target(timeout=timeout)
         if uid:
-            if self.mifare_classic_authenticate_block(uid, block_number, key=key):
-                response = self.ntag2xx_write_block(block_number)
+            if await self.mifare_classic_authenticate_block(uid, block_number, key=key):
+                response = await self.ntag2xx_write_block(block_number)
                 return response
             else:
                 if debug:
